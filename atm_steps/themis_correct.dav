@@ -1,0 +1,80 @@
+define themis_correct(){
+
+	if($ARGC==0) {
+		printf("\n")
+		printf("Use TES data to do THEMIS atmospheric correction\n")
+		printf("$1: THEMIS id\n")
+		printf("$2: TES emissivity with 73 bands\n")
+		printf("$3: Mineral library\n")
+		printf("$4: 73 channel atmospheric library\n")
+		printf("Output: Corrected THEMIS IR cube\n")
+		printf("\n")
+		return(null)
+	}
+
+	id=$1 
+	tes=$2
+	minlib=$3
+	atmlib=$4
+
+	stime=syscall("date")[,1]
+	
+	image=read_geo(id+".cub")
+	geostruct=image
+	geostruct.data=sstretch(geostruct.data[,,9])
+
+	spec=sma(tes.emi73,minlib,atmlib,wave1=200,wave2=1305,surface=1,nn=1)
+	surf_em=i2i(spec.rematm,from='tes73',to='themis')
+	
+	shape=struct()
+	shape.wkt=text(1)
+	shape.string_feature=text(1)
+	shape.string_feature[,1]="polygon"
+
+  miny=1
+  maxy=image.h
+  if(HasValue(get_struct(tes,"maxlat"))!=0) {
+    miny=proj_geocoord(float(0.)//float(tes.maxlat),geostruct)
+    miny=int(round(miny[2]))
+  }
+  if(HasValue(get_struct(tes,"minlat"))!=0) {
+    maxy=proj_geocoord(float(0.)//float(tes.minlat),geostruct)
+    maxy=int(round(maxy[2]))
+  }
+
+	N=dim(tes.emi73)[1]
+	surf_spec=create(image.w,maxy-miny+1,9,start=0,step=0,format=float)
+	atm_spec=create(N,1,9,start=0,step=0,format=float)
+	mask_cont=create(image.w,maxy-miny+1,1,start=0,step=0,format=float)
+
+	for(i=1;i<=N;i++) {
+		shape.wkt[,1]=tes.wkt[,i]
+		mask=shape2georaster(shape,geostruct,ignore=0,color=1)
+		train_data=mask.data[,miny:maxy,1] * image.data[,miny:maxy,]
+		mask_cont=mask.data[,miny:maxy,1]+mask_cont
+		data=train_data[,,1:9]
+		data=thm.themis_emissivity(data,1//2//3//4//5//6//7//8//9,b1=3,b2=9)
+		data=data.emiss
+		ave_data=avg(data,axis=xy,ignore=0.0)
+		data [where (data<0.2)]=0
+		data [where (data>1.8)]=0
+		atm_trans=float(ave_data[,,1:9]/surf_em[i,,1:9])
+		surf_spec=data/atm_trans+surf_spec
+		atm_spec[i]=-ln(atm_trans)
+	}
+	surf_spec=surf_spec/mask_cont
+
+	printf("Start: %s\n\n", stime)
+	printf("Finish: %s\n\n", syscall("date")[,1])
+
+	thmx=make_band(themis=1,cm=1,descend=1)
+	out=struct()
+	out.surf=surf_spec
+	out.atm=atm_spec
+	out.tes_surf=spec.rematm
+	out.xaxis=thmx[,,1:9]
+
+	write(out,id+'_tes.hdf',hdf,force=1)
+
+	return(out)
+}  

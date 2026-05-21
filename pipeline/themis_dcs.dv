@@ -1,0 +1,41 @@
+# Davinci script: read a projected THEMIS IR .cub, produce a DCS PNG + GeoTIFF.
+# Invoked as: davinci -f themis_dcs.dv cub=<path.cub> png=<path.png> [tif=<path.tif>]
+
+source($DV_HOME+"/library/library_linux.dvrc")
+verbose=0
+
+opt = {\
+  cub = "",\
+  png = "",\
+  tif = ""\
+}
+opt = getopt($ARGV, opt)
+
+if (opt.cub == "" || opt.png == "") {
+    printf("usage: davinci -f themis_dcs.dv cub=<path.cub> png=<path.png> [tif=<path.tif>]\n")
+    exit
+}
+
+printf("themis_dcs.dv: loading %s\n", opt.cub)
+a = read_geo(opt.cub)
+
+# Zero out ISIS3 NULL pixels (-3.40282e+38) so dcs's histogram isn't dominated
+# by the sentinel value.
+masked = a.data
+masked[where(masked < -1e30)] = 0
+
+stack = cat(masked[,,8], masked[,,7], masked[,,5], axis=z)
+d = dcs(stack, ignore=0)
+printf("dcs: dim=%dx%dx%d\n", dim(d)[1], dim(d)[2], dim(d)[3])
+
+printf("writing PNG -> %s\n", opt.png)
+write(d, opt.png, png, force=1)
+printf("PNG done\n")
+
+if (opt.tif != "") {
+    printf("writing GeoTIFF -> %s\n", opt.tif)
+    out = a
+    out.data = float(d)
+    write_geotiff(out, opt.tif)
+    printf("TIF done\n")
+}

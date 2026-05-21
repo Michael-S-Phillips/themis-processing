@@ -1,0 +1,41 @@
+In a terminal window:
+
+source $ISISROOT/scripts/isis3Startup.sh
+thm_pre_process.dv from=I41931002 to=I41931002.lev1.cub
+spiceinit from=I41931002.lev1.cub
+cam2map from=I41931002.lev1.cub to=I41931002.lev2.cub
+thm_post_process.dv from=I41931002.lev2.cub to=I41931002.cub
+
+In davinci:
+source("/home/drogers/gen_themis/themis_tes_overlay.dav")
+t=themis_tes_overlay("I41931002",minlat=-23,maxlat=-20,albedo=.16)
+write(t,"tesover_I41931002.hdf",hdf,force=1)
+
+minlib=read("/home/drogers/gen_themis/PDART_mineral_library.hdf")
+atmlib=read("/home/drogers/gen_themis/TES_atmlib.hdf")
+
+source("/home/drogers/gen_themis/themis_correct.dav")
+
+cor=themis_correct("I41931002",t,minlib,atmlib)
+
+#write ER Mapper file (open with ENVI using File-Open External File-IP Software
+write(bil(cor.surf),"I41931002_rematm.envi",ers,force=1)
+
+#create dcs image
+d=dcs(cat(cor.surf[,,8],cor.surf[,,7],cor.surf[,,5],z),ignore=0)
+write(d,"I41931002_dcs.png",png,force=1)
+
+
+
+To make nice-looking DCS radiance images that are not masked by TES coverage:
+a=read_geo("I41931002.cub")
+b=thm.rectify(a.data,ignore=-32768.0)
+c=rrmnoise_pca(b.data)
+d=dcs(cat(c[,,8],c[,,7],c[,,5],z),ignore=-32768.0,sample=cat(b.data[,,8],b.data[,,7],b.data[,,5],z))
+
+Then project it:
+b.data=d
+z=thm.reconstitute(b)
+a.data=z
+write_geotiff(a,"I41931002_niceDCSrad875.tif")
+

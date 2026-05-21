@@ -1,0 +1,145 @@
+define themis_tes_overlay(ock_start,ock_end,minlat,maxlat,em_angle,in_angle,temperature,albedo,dust,waterice){
+ 
+	if($ARGC==0){
+		printf("\nAccepts standard mysql queries on the tes database at the MSFF for a single THEMIS image overlap\n")
+		printf("Returns the results of the query with constraints below\n")
+		printf("$1 = THEMIS image ID, for example I01001001\n")  
+		printf("$2 = select items seprated by comma from TES Layer options\n") 
+		printf("     optional, default contains st_astext, emissivity, ock, ick, detector\n")
+		printf("\nTES criteria\n")
+		printf("ock_start = minimum orbit counter keeper (optional, default is 1583)\n")
+		printf("ock_end = maximum orbit counter keeper (optional, default is 7000)\n")
+		printf("minlat = minimum latitude (optional, default is -60)\n")
+		printf("maxlat = maximum latitude (optional, default is 60)\n")
+		printf("em_angle = maximum emission angle (optional, default is 10)\n")
+		printf("in_angle = maximum incidence angle (optional, default is 80)\n")
+		printf("temperature = minimum target temperature (optional, default is 255)\n")
+		printf("albedo = maximum albedo (optional, default is 0.2)\n")
+		printf("dust = maximum atmospheric dust opacities (optional, default is 0.15)\n")
+		printf("waterice = maximum water ice opacities (optional, default is 0.08)\n\n")
+		return(null)
+	}
+
+#jmarsFields = "obs_sclk, orbit_number, orbit_counter_keeper, instrument_time_count, mirror_pointing_angle, imc_count, observation_type,"
+#+ "scan_length, data_packet_type, schedule_type, spectrometer_gain, visual_bolometer_gain, preprocessor_detector_number,"
+#+ "detector_mask, observation_classification, mission_phase, intended_target, tes_sequence, neon_lamp_status, timing_accuracy,"
+#+ "classification_value, quality, hga_motion, solar_panel_motion, algor_patch, imc_patch, momentum_desaturation, "
+#+ "equalization_table, primary_diagnostic_temperatures, fft_start_index, is_aerobrake, surface_pressure, nadir_temperature_profile,"
+#+ "co2_continuum_temp, spectral_surface_temperature, temperature_profile_residual, nadir_opacity, nadir_opacity_residual,"
+#+ "co2_downwelling_flux, total_downwelling_flux, temperature_profile_rating, atmospheric_opacity_rating, atmospheric_calibration_id,"
+#+ "temporal_integration_scan_number, raw_visual_bolometer, detector, raw_thermal_bolometer, calibrated_visual_bolometer,"
+#+ "lambert_albedo, bolometric_thermal_inertia, bolometric_brightness_temp, visual_bol_calibration_id, thermal_bol_calibration_id,"
+#+ "bolometric_inertia_rating, bolometer_lamp_anomaly, longitude, longitude_00, latitude, phase, emission, incidence, planetary_phase,"
+#+ "heliocentric_lon, sub_sc_lon, sub_sc_lon_00, sub_sc_lat, sub_solar_lon, sub_solar_lon_00, sub_solar_lat, target_distance,"
+#+ "height, altitude, local_time, solar_distance, angular_semidiameter, version_id, spectral_mask, compression_mode, detector_temperature,"
+#+ "target_temperature, spectral_thermal_inertia, radiance_calibration_id, major_phase_inversion, algor_risk, calibration_failure,"
+#+ "calibration_quality, spectrometer_noise, spectral_inertia_rating, detector_mask_problem, raw_radiance, calibrated_radiance,"
+#+ "emissivity, perc_bas1, perc_bas2, perc_hem, perc_dust1, perc_dust2, perc_ice1, perc_ice2, perc_bb, rms_error, tot_dust, tot_ice, hem_index,"
+#+ "lw_depth, sw_depth, lw_ratio, atm_adj_emiss, mars_year "
+
+	id=$1	
+	if($ARGC==1) {
+		query="st_astext(fp),emissivity,orbit_counter_keeper,instrument_time_count,detector"
+	} else {
+		query=$2
+		query="st_astext(fp),emissivity,orbit_counter_keeper,instrument_time_count,detector,"+query
+	}
+
+# TES criteria
+	if(HasValue(ock_start)==0) ock_start=1583
+	if(HasValue(ock_end)==0) ock_end=7000
+	if(HasValue(minlat)==0) minlat=-60
+	if(HasValue(maxlat)==0) maxlat=60
+	if(HasValue(em_angle)==0) em_angle=10
+	if(HasValue(in_angle)==0) in_angle=80
+	if(HasValue(temperature)==0) temperature=255
+	if(HasValue(albedo)==0) albedo=0.2
+	if(HasValue(dust)==0) dust=0.15
+	if(HasValue(waterice)==0) waterice=0.08
+
+# Checks to see if its a valid format in the form of Ixxxxxxxx #
+	if(length(id)!=9){
+		printf("invalid image_ID, must be 9 characters long\n\n")
+		return(null)
+	}
+# Checks to see if the beginning filename starts appropriately #
+	if(id[1,1]!="I"){
+		printf("invalid image_ID, must begin with either an I \n\n")
+		return(null)
+	}
+# Checks to see if image_id given exists in database #
+	temp_result = read_lines(themis3db("select file_id from thm3_header where file_id='"+id+"';",psql=1,v=0))
+	if(length(temp_result)==0){
+		printf("\nImage ID supplied does not exist in database\n\n")
+		return(null)
+	}
+
+# Substitute % for %25
+	queryout=""
+	while(strstr(query,'%')!=0){
+		pos=strstr(query,"%")
+		queryout=queryout//query[:pos-1]+"%25"
+		query=query[pos+1:]
+	}
+	queryout=queryout//query
+
+# Make a call to pgis_outline from thmteam.pgisgeom, no need to use ST_astext here #
+	url_outline=(themis3db("select pgis_outline from thmteam.pgisgeom where file_id='"+id+"';",psql=1,header=0,v=0))
+	outline=read_lines(url_outline)
+  
+	url=sprintf("http://app-davinci.mars.asu.edu//Davinci/PSQLTESQueryTool?queryString=select %s from tes_4_jmars where ST_contains('%s',fp) and orbit_counter_keeper>%i and orbit_counter_keeper<%i and latitude between %f and %f and emission<%f and incidence<%f and tot_dust<%f and tot_ice<%f and lambert_albedo<%f and target_temperature>%f&displayHeader=1",query,outline[,1],ock_start,ock_end,minlat,maxlat,em_angle,in_angle,dust,waterice,albedo,temperature)
+
+	#tes=read_lines(url)
+	tes=load_csv(url)
+
+################
+# Extract information about emissivity, ock, ick, detector, tesx
+	N=length(tes.st_astext)
+	emi=create(N,143,1,format=float,start=0,step=0)
+	for(j=1;j<=N;j++) {
+		emi_tmp=strsplit(tes.emissivity[,j])
+		emi_tmp[,1]=delim(emi_tmp[,1],"{",1)
+		emi_tmp[,143]=delim(emi_tmp[,143],"}",1)
+		emi[j,,]=atof(emi_tmp)
+	}
+	ock=translate(tes.orbit_counter_keeper,x,y)
+	ick=translate(tes.instrument_time_count,x,y)
+	det=translate(tes.detector,x,y)
+	tesx=make_tesx()
+	tesx73=cat(tesx[,,9:35],tesx[,,65:110],z)
+	emi=translate(emi,y,z)
+	emi73=cat(emi[,,9:35],emi[,,65:110],z)
+
+	out=struct()
+	out.wkt=tes.st_astext
+	out.tesx=tesx
+	out.tesx73=tesx73
+	out.emi=emi
+	out.emi73=emi73
+	out.ock=ock
+	out.ick=ick
+	out.det=det
+  out.ock_ick_det=translate(cat(int(ock),int(ick),int(det),y),x,y)
+  ind=create(1,length(out.ock),1,start=1,step=1,format=int)
+  out.ock_ick_det=cat(ind,out.ock_ick_det,x)
+  out.minlat=minlat
+  out.maxlat=maxlat
+  if(minlat==-60 && maxlat==60) {
+    remove_struct(out,"minlat")
+    remove_struct(out,"maxlat")
+  }
+
+#	write(out,id+"_tesfp.hdf",hdf,force=1)
+
+# Display TES footprints overlapping THEMIS image
+	geostruct=read_geo(id+".cub")
+	shape=struct()
+	shape.wkt=out.wkt
+	shape.string_feature=text(N)
+	shape.string_feature[,1:]="polygon"
+	geostruct.data=sstretch(geostruct.data[,,9])
+	overlap=shape2georaster(shape,geostruct,ignore=0,color=255//0//0,hsv=1)
+	display(overlap.data)
+        out.image=overlap.data
+	return(out)
+}

@@ -1,0 +1,107 @@
+# Davinci script: full Rogers-style atmospheric correction for a projected
+# THEMIS IR cube. Wraps `themis_tes_overlay` (queries ASU's public TES
+# database) + `themis_correct` (atmospheric attenuation removal).
+#
+# Invoked as:
+#   davinci -q -f themis_atm_correct.dv id=<obsid> workdir=<dir> \
+#       minlib=<path/PDART_mineral_library.hdf> \
+#       atmlib=<path/TES_atmlib.hdf> \
+#       tes_overlay=<path/themis_tes_overlay.dav> \
+#       atm_correct=<path/themis_correct.dav> \
+#       [minlat=<f>] [maxlat=<f>] [albedo=<f>]
+#
+# Required inputs in <workdir>:
+#   - <id>.cub  : the projected level-2 cube (we symlink lev2.cub to this name)
+#
+# Outputs in <workdir>:
+#   - tesover_<id>.hdf  : TES footprints overlapping the THEMIS image
+#   - <id>_tes.hdf      : the corrected output struct (.surf is the corrected cube)
+#   - <id>_rematm.envi  : ER Mapper/ENVI format of the corrected surface cube
+#   - <id>_atm.dcs.png  : DCS image of the atmospherically-corrected cube
+#
+# Falls back gracefully if `themis_tes_overlay` returns no footprints (e.g.
+# image lat band has no good TES coverage).
+
+source($DV_HOME+"/library/library_linux.dvrc")
+verbose=0
+
+opt = {\
+  id = "",\
+  workdir = ".",\
+  minlib = "",\
+  atmlib = "",\
+  tes_overlay = "",\
+  atm_correct = "",\
+  minlat = -90.0,\
+  maxlat =  90.0,\
+  albedo = 0.25\
+}
+opt = getopt($ARGV, opt)
+
+if (opt.id == "" || opt.minlib == "" || opt.atmlib == "" ||
+    opt.tes_overlay == "" || opt.atm_correct == "") {
+    printf("usage: davinci -q -f themis_atm_correct.dv id=<obsid> workdir=<dir> minlib=<path> atmlib=<path> tes_overlay=<path> atm_correct=<path> [minlat=<f>] [maxlat=<f>] [albedo=<f>]\n")
+    exit
+}
+
+# Move to workdir so read_geo(id+".cub") and write(id+"_*.hdf") land in the right place.
+syscall("cd "+opt.workdir)
+chdir(opt.workdir)
+
+printf("loading mineral library: %s\n", opt.minlib)
+minlib = read(opt.minlib)
+printf("loading atmospheric library: %s\n", opt.atmlib)
+atmlib = read(opt.atmlib)
+
+printf("sourcing %s\n", opt.tes_overlay)
+source(opt.tes_overlay)
+printf("sourcing %s\n", opt.atm_correct)
+source(opt.atm_correct)
+
+printf("querying TES overlap for %s (minlat=%g maxlat=%g albedo=%g)\n",
+       opt.id, opt.minlat, opt.maxlat, opt.albedo)
+t = themis_tes_overlay(opt.id, minlat=opt.minlat, maxlat=opt.maxlat, albedo=opt.albedo)
+
+if (HasValue(t) == 0) {
+    printf("ERROR: themis_tes_overlay returned null. Check ASU service connectivity, "
+           "credentials, or whether image is in the catalog.\n")
+    exit
+}
+
+printf("TES footprints overlapping image: %d\n", length(t.wkt))
+if (length(t.wkt) < 1) {
+    printf("ERROR: no TES footprints overlap %s with the given filters\n", opt.id)
+    exit
+}
+
+# themis_correct uses tes.minlat/maxlat to compute miny/maxy via proj_geocoord;
+# if maxlat lies outside the image's latitude extent (very common — e.g. our
+# image spans lat=-12..-0.18 but we passed maxlat=0), proj_geocoord returns a
+# pixel y < 1, the slice [,miny:maxy,] degenerates, and the entire correction
+# silently produces zero output. Strip these fields so themis_correct falls
+# back to miny=1, maxy=image.h.
+if (HasValue(get_struct(t,"minlat")) != 0) {
+    remove_struct(t, "minlat")
+}
+if (HasValue(get_struct(t,"maxlat")) != 0) {
+    remove_struct(t, "maxlat")
+}
+
+write(t, "tesover_"+opt.id+".hdf", hdf, force=1)
+
+printf("running themis_correct ...\n")
+cor = themis_correct(opt.id, t, minlib, atmlib)
+printf("themis_correct done. cor.surf dims=%dx%dx%d\n",
+       dim(cor.surf)[1], dim(cor.surf)[2], dim(cor.surf)[3])
+
+printf("writing ENVI rematm file ...\n")
+write(bil(cor.surf), opt.id+"_rematm.envi", ers, force=1)
+
+printf("writing DCS image of atmospherically-corrected cube ...\n")
+masked = cor.surf
+masked[where(masked < -1e30)] = 0
+masked[where(masked > 1e30)]  = 0
+d = dcs(cat(masked[,,8], masked[,,7], masked[,,5], axis=z), ignore=0)
+write(d, opt.id+"_atm.dcs.png", png, force=1)
+
+printf("themis_atm_correct.dv: done\n")

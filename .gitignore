@@ -1,0 +1,27 @@
+# Pipeline outputs — large ISIS cubes and intermediate products.
+# Anything in a work_* directory is regenerable from the EDR + pipeline.
+work/
+work_*/
+
+# Test data (~22 MB EDR file, re-downloadable from PDS at
+# https://pds.nasa.gov/data/ody-m-THEMIS/data/odtie0_xxxx/i012xxedr/)
+test_data/
+
+# Davinci runtime detritus that the SMB share accumulates.
+.dvlog
+print.prt
+Thumbs.db
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# ISIS sidecar pgw/aux files for previews
+*.pgw
+*.aux.xml
+
+# OS / editor noise
+.DS_Store
+*~
+*.swp
