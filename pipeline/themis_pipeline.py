@@ -47,6 +47,8 @@ import numpy as np
 PIPELINE_VERSION = "2.1.1"          # 2.1: regional-atmosphere correction (regional_atm.py) by default
 # 2026-11-24: partial-band and TES-outage fixes kept at 2.1.1. Nothing changes for 10-band scenes, so ok
 # scenes are not reprocessed; runs with the fixes show the steps band_check and pad_bands in their manifests.
+# 2026-11-25: an empty TES result is checked against the ASU database (tes_db_error); a database fault fails
+# as tes_query_failed instead of no_tes_footprints / atm_empty.
 log = logging.getLogger("themis")
 
 ATM_STEPS_DIR = Path(os.environ.get("THEMIS_ATM_STEPS", Path(__file__).resolve().parents[1] / "atm_steps"))
@@ -497,6 +499,27 @@ def tes_service_up(timeout: float = 30.0) -> bool:
         return False
 
 
+TES_QUERY = "http://app-davinci.mars.asu.edu//Davinci/PSQLTESQueryTool"
+
+
+def tes_db_error(minlat: float, maxlat: float, timeout: float = 120.0) -> str | None:
+    """Ask the TES footprint table for a latitude-band count, as the overlay's query scans it. The ASU
+    service answers database failures with HTTP 200 and a 'SQL Error: ...' body, which themis_tes_overlay
+    reads as zero rows (seen 2026-11-23/25: 'could not read block ... Input/output error'). Returns the
+    error text, or None if the table answered. Only called when a scene came back with no footprints."""
+    import urllib.parse
+    import urllib.request
+    q = (f"select count(*) from tes_4_jmars where latitude between {min(minlat, maxlat):.3f} "
+         f"and {max(minlat, maxlat):.3f}")
+    url = TES_QUERY + "?" + urllib.parse.urlencode({"queryString": q, "displayHeader": 1})
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            body = r.read(4096).decode("utf-8", "replace")
+    except Exception as e:                            # unreachable or timed out: also not a real "none"
+        return f"TES query failed: {type(e).__name__}: {e}"
+    return body.strip().splitlines()[0][:200] if "SQL Error" in body or "ERROR" in body else None
+
+
 def step_atm(p: Paths, env: dict, minlat: float, maxlat: float, albedo: float) -> dict:
     if p.tes_hdf.exists() and p.tes_hdf.stat().st_size > 500_000:
         return {"skipped": "exists"}
@@ -517,7 +540,12 @@ def step_atm(p: Paths, env: dict, minlat: float, maxlat: float, albedo: float) -
     info = {"n_tes_footprints": int(nfp[-1]) if nfp else None}
     if "returned null" in out:
         raise PipelineError("tes_query_failed", "themis_tes_overlay returned null (ASU TES service?)")
-    if re.search(r"no TES footprints overlap", out) or info["n_tes_footprints"] == 0:
+    empty = bool(re.search(r"no TES footprints overlap", out)) or info["n_tes_footprints"] == 0
+    if empty or not p.tes_hdf.exists() or p.tes_hdf.stat().st_size < 500_000:
+        err = tes_db_error(minlat, maxlat)            # an ASU database fault looks like zero footprints
+        if err:
+            raise PipelineError("tes_query_failed", f"ASU TES database error, retry later: {err}")
+    if empty:
         raise PipelineError("no_tes_footprints", "no TES footprints pass the overlay filters")
     if not p.tes_hdf.exists() or p.tes_hdf.stat().st_size < 500_000:
         rc = re.search(r"__returncode__=(-?\d+)", out)

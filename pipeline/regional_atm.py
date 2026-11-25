@@ -51,11 +51,20 @@ def row_latitudes(lev2: Path) -> np.ndarray:
     return np.asarray(lat)
 
 
+def present_bands(atm: np.ndarray) -> np.ndarray:
+    """Bands with a finite atmosphere in at least one footprint. All 9 for a 10-band observation; for a
+    partial-band one (pad_to_ten_bands: missing filters NULL, e.g. 8-band scenes lack filters 1-2) the
+    missing bands are NaN in every footprint and must not veto the others."""
+    return np.isfinite(atm).any(axis=0)
+
+
 def regional_transmittance(atm: np.ndarray, fp_lat: np.ndarray, row_lat: np.ndarray,
                            window_deg: float, min_footprints: int) -> np.ndarray:
-    """atm: (N, 9) -ln transmittance per footprint. Returns T (9, lines); NaN where too few footprints."""
+    """atm: (N, 9) -ln transmittance per footprint. Returns T (9, lines); NaN where too few footprints
+    and in bands the observation lacks."""
     T = np.full((atm.shape[1], len(row_lat)), np.nan, np.float32)
-    keep = np.all(np.isfinite(atm), axis=1)        # footprints with no THEMIS pixels: atm = inf/NaN
+    b = present_bands(atm)
+    keep = np.all(np.isfinite(atm[:, b]), axis=1)  # footprints with no THEMIS pixels: atm = inf/NaN
     atm, fp_lat = atm[keep], fp_lat[keep]
     rl = np.round(row_lat, 2)
     for lat0 in np.unique(rl):
@@ -88,10 +97,12 @@ def apply(tes_hdf: Path, emiss_hdf: Path, tesover_hdf: Path, lev2: Path,
     if len(row_lat) != E.shape[1]:
         raise ValueError(f"lev2 has {len(row_lat)} lines, surf {E.shape[1]}")
     T = regional_transmittance(atm, fp_lat, row_lat, window_deg, min_footprints)
+    b = present_bands(atm)
     E[~np.isfinite(E)] = 0
-    valid = (E[8] > 0) & np.all(np.isfinite(T) & (T > 0), axis=0)[:, None]
+    valid = (E[8] > 0) & np.all(np.isfinite(T[b]) & (T[b] > 0), axis=0)[:, None]
     with np.errstate(invalid="ignore", divide="ignore"):
         surf = np.where(valid[None], E / T[:, :, None], 0).astype(np.float32)
+    surf[~b] = 0                                   # bands the observation lacks: 0 = invalid
     comp = dict(compression="gzip", compression_opts=4, shuffle=True,
                 chunks=(1, min(512, E.shape[1]), E.shape[2]))
     # write a complete new file, then replace: a crash never leaves a half-modified _tes.hdf
@@ -106,10 +117,11 @@ def apply(tes_hdf: Path, emiss_hdf: Path, tesover_hdf: Path, lev2: Path,
         f.create_dataset("t_regional", data=T)
         f.attrs.update(atm_mode="regional", atm_window_deg=window_deg,
                        atm_min_footprints=min_footprints, atm_n_footprints=len(atm),
-                       atm_n_footprints_used=int(np.all(np.isfinite(atm), axis=1).sum()))
+                       atm_n_footprints_used=int(np.all(np.isfinite(atm[:, b]), axis=1).sum()),
+                       atm_bands_present=np.flatnonzero(b) + 1)
     tmp.replace(tes_hdf)
-    rows_ok = int(np.all(np.isfinite(T) & (T > 0), axis=0).sum())
-    return dict(atm_window_deg=window_deg, n_footprints=len(atm),
-                n_footprints_used=int(np.all(np.isfinite(atm), axis=1).sum()), rows_with_T=rows_ok,
+    rows_ok = int(np.all(np.isfinite(T[b]) & (T[b] > 0), axis=0).sum())
+    return dict(atm_window_deg=window_deg, n_footprints=len(atm), bands_present=(np.flatnonzero(b) + 1).tolist(),
+                n_footprints_used=int(np.all(np.isfinite(atm[:, b]), axis=1).sum()), rows_with_T=rows_ok,
                 rows_total=len(row_lat), valid_px_regional=int(valid.sum()),
                 valid_px_footprint=int((surf_fp[8] > 0).sum()))

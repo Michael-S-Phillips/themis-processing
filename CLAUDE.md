@@ -15,6 +15,71 @@ This is a **workspace directory** containing both the original THEMIS-processing
 
 The `.docx` is still useful as the canonical reference, but the path/version specifics in it are JHU/APL-era artifacts; the working version is the Python pipeline.
 
+## v2 pipeline (2026-11-16): calibrated RDR input — read this first
+
+`pipeline/themis_pipeline.py` is now v2. v1 (kept as `pipeline/themis_pipeline_legacy_edr.py`) fed raw
+8-bit EDR data numbers x 1e-5 into the atmospheric correction as if they were radiance: `thm2isis`
+does NOT calibrate EDRs. v2 takes the team-calibrated RDR (`<ID>RDR.QUB`, W cm-2 sr-1 um-1), applies
+no rescaling, and runs a units gate (band-9 BT vs PDS index temperatures) before the atmospheric
+correction. It refuses EDR input unless `--allow-uncalibrated-edr`. Every step is checked and each
+scene writes `<ID>.manifest.json`. `--ingest runbook` uses Rogers' `thm_pre_process.dv` /
+`thm_post_process.dv` instead. Details and the validation plan:
+`massif-themis-analysis/wiki/methods/themis-pipeline-validation.md`. The sections below describe v1
+and are kept for history; the "radiance unit scale" fix in them is wrong.
+
+**v2.1 (2026-11-19): regional atmosphere by default.** After `themis_correct`, the pipeline runs
+`pipeline/themis_emissivity_full.dv`, which writes the THEMIS emissivity E for every pixel, computed
+exactly as inside `themis_correct`. It then runs `pipeline/regional_atm.py`. For each image row this
+takes the median of the per-footprint transmittances (`atm` in `_tes.hdf`) over the footprints within
+a 3° latitude window, and sets surf = E / T(row). In `<id>_tes.hdf`, `surf` is now the regional
+product. `surf_footprint` keeps `themis_correct`'s per-footprint result, and `emiss` and `t_regional`
+are stored too. Coverage is about 4x larger (whole strip, not just under footprints); files are
+~6x larger. Flags: `--atm-mode {regional,footprint}`, `--atm-window-deg 3.0`,
+`--atm-min-footprints 5`. Why 3° and why regional: validation wiki §4.2 (cross-scene repeatability
+with independent TES orbits). Production uses `--ingest runbook` (chain C radiance processing).
+`_atm.dcs.png` is still made from the per-footprint result.
+Footprints with non-finite `atm` are left out of the median (fixed 2026-11-20). `themis_correct` gives
+atm = +inf to footprints that have no THEMIS pixels, for example those outside a cropped lev2. Before
+the fix this produced T = 0 and `surf` = inf in cropped scenes. `regional_atm.apply(..., redo=True)`
+recomputes `surf` from the stored `surf_footprint` and `emiss` without rerunning davinci.
+
+**2.1.1 production notes (2026-11-23/25).**
+- *Download failures.* With `--ingest runbook`, `thm_pre_process.dv` downloads from ASU. An empty lev1 is
+  reported as `fetch_failed` (before 2.1.1 it surfaced as spiceinit "Unable to open" = `command_failed`).
+  `massif-themis-analysis/scripts/run_pipeline_batch.py` retries `fetch_failed` 3 times per scene
+  (waits 5 and 10 min); rerunning the batch retries every scene that is not `ok` at the current version.
+- *Partial-band observations.* Some IR observations carry only some filters (seen: 3-10, and 4/9/10);
+  every Davinci step indexes bands by position (`[,,1:9]`, band 9 = 12.57 um). Bands are now located by
+  BandBin `FilterNumber`: step `band_check` fails a scene as `partial_bands` if any WAC/CSFM filter
+  (3, 4, 5, 7, 8, 9) is missing, and step `pad_bands` rewrites the canonical `<id>.cub` in the full
+  ten-filter layout with the missing filters as ISIS NULL (BandSequential Real only; History moved).
+  The units gate reads filter 9, not position 9.
+- *TES service outages.* `themis_tes_overlay` returns an empty result, not null, when ASU's TES service
+  is down, which used to be recorded as `no_tes_footprints`. `step_atm` now probes the service first and
+  fails as `tes_query_failed` (retry later) if it is unreachable. `no_tes_footprints` recorded during an
+  outage may be wrong; rerun them.
+- *TES database faults (2026-11-25).* The service can be up while its database fails: `PSQLTESQueryTool`
+  answers HTTP 200 with a body `SQL Error: ERROR: could not read block ... Input/output error` (indexed
+  lookups by orbit still worked; any latitude scan failed), and the overlay reads that as zero rows. When
+  `step_atm` gets no footprints or no `_tes.hdf`, `tes_db_error()` now runs a latitude-band count on
+  `tes_4_jmars`; an SQL error or no answer fails the scene as `tes_query_failed`. Quick manual check:
+  `curl -G http://app-davinci.mars.asu.edu//Davinci/PSQLTESQueryTool --data-urlencode "queryString=select
+  count(*) from tes_4_jmars where latitude between -30 and -29" --data-urlencode displayHeader=1`.
+- *Partial-band scenes in the regional atmosphere (2026-11-25).* `regional_atm.py` required a finite
+  atmosphere in all 9 bands, so padded 8-band scenes lost every footprint and failed `atm_empty`
+  ("regional atmosphere left no valid pixels"). It now uses only the bands present (`present_bands`);
+  absent bands are 0 in `surf`. Ten-band output is bit-identical (tested on I06456003). Scenes that already
+  have a converted `_tes.hdf` can be redone offline with `regional_atm.apply(..., redo=True)`.
+- The version stays 2.1.1: nothing changes for ten-band scenes, and a bump would reprocess every `ok`
+  scene.
+
+## Git
+
+Since 2026-11-25 the git dir is `.git/` inside this directory on the share (before that `.git` was a file
+pointing to `/home/phillipsm/git-repos/themis-processing.git` on the retired Linux workstation, whose
+commits after the GitHub initial commit were not recoverable). `core.filemode` is false because the share
+has no executable bit. The GitHub remote `origin` holds only the initial commit until it is pushed.
+
 ## Running the pipeline
 
 ```bash
@@ -90,7 +155,7 @@ Outputs (in addition to the basic-pipeline ones):
 
 Three nontrivial fixes were needed to get this working — flag them if you ever rebuild the pipeline:
 
-1. **Radiance unit scale.** ISIS `thm2isis` produces calibrated THEMIS IR radiance ~1×10⁵ larger than what `temp_rad_v4` (the brightness-temperature lookup that `thm.themis_emissivity` reads) expects. Empirically, dividing the lev2 cube by 1.0e5 brings band-9 radiance into the 1×10⁻³ W m⁻² sr⁻¹ µm⁻¹ range that produces sensible 270–330 K brightness temperatures from Mars equatorial surfaces. The pipeline calls `algebra A=1e-5` on the lev2 cube to produce `<id>.cub` before invoking `themis_correct`.
+1. **Radiance unit scale (WRONG — see v2 section: the input was uncalibrated EDR DN, not radiance).** ISIS `thm2isis` produces calibrated THEMIS IR radiance ~1×10⁵ larger than what `temp_rad_v4` (the brightness-temperature lookup that `thm.themis_emissivity` reads) expects. Empirically, dividing the lev2 cube by 1.0e5 brings band-9 radiance into the 1×10⁻³ W m⁻² sr⁻¹ µm⁻¹ range that produces sensible 270–330 K brightness temperatures from Mars equatorial surfaces. The pipeline calls `algebra A=1e-5` on the lev2 cube to produce `<id>.cub` before invoking `themis_correct`.
 2. **Negative `miny` from out-of-bounds TES bounds.** `themis_correct` computes `miny = proj_geocoord(0,tes.maxlat,geostruct)[2]` and uses `[,miny:maxy,]` to slice the image. If `tes.maxlat` is outside the image's latitude extent (e.g. our image runs lat -12.3..-0.18 but the runbook example uses maxlat=0), `miny` lands at a negative pixel y, the slice degenerates to an empty array, and the whole correction silently fills with zeros. `pipeline/themis_atm_correct.dv` strips `minlat`/`maxlat` from the tes struct before passing it to `themis_correct` so the latter falls back to `miny=1, maxy=image.h`.
 3. **`PROJ_DATA` must be inherited.** `shape2georaster` shells out to `ogr2ogr` to reproject TES polygons; `ogr2ogr` needs `PROJ_DATA` (the conda-isis activation hook sets this) to read the longlat→sinusoidal SRS definitions. Run the pipeline from an activated `isis` conda env so this is inherited; bare `source davinci.env` is not enough.
 
