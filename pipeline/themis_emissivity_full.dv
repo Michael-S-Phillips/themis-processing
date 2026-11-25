@@ -1,0 +1,34 @@
+# Davinci script: THEMIS emissivity E for every pixel of <id>.cub, computed exactly as inside
+# Rogers' themis_correct (atm_steps/themis_correct.dav, per-footprint loop):
+#   data = image.data[,,1:9]
+#   data = thm.themis_emissivity(data, 1//2//3//4//5//6//7//8//9, b1=3, b2=9).emiss
+#   data[where(data < 0.2)] = 0 ; data[where(data > 1.8)] = 0
+# themis_correct computes E only under TES footprints and does not save it. The regional-atmosphere
+# step (themis_pipeline.py step_regional_atm) needs it everywhere: surf = E / T_regional.
+#
+# Invoked as:
+#   davinci -q -f themis_emissivity_full.dv id=<obsid> workdir=<dir>
+# Reads <workdir>/<id>.cub (the radiance cube themis_correct reads); writes <workdir>/<id>_emiss.hdf
+# with key "emiss" (9 bands, THEMIS bands 1-9; 0 = invalid).
+
+source($DV_HOME+"/library/library_linux.dvrc")
+verbose=0
+
+opt = {id = "", workdir = "."}
+opt = getopt($ARGV, opt)
+if (opt.id == "") {
+    printf("usage: davinci -q -f themis_emissivity_full.dv id=<obsid> workdir=<dir>\n")
+    exit
+}
+chdir(opt.workdir)
+
+image = read_geo(opt.id+".cub")
+data = image.data[,,1:9]
+data = thm.themis_emissivity(data, 1//2//3//4//5//6//7//8//9, b1=3, b2=9)
+data = data.emiss
+data[where(data < 0.2)] = 0
+data[where(data > 1.8)] = 0
+out = struct()
+out.emiss = float(data)
+write(out, opt.id+"_emiss.hdf", hdf, force=1)
+printf("themis_emissivity_full.dv: wrote %s_emiss.hdf (%dx%dx%d)\n", opt.id, dim(data)[1], dim(data)[2], dim(data)[3])
